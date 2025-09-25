@@ -36,6 +36,40 @@ ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
 OPENAI_STT_MODEL = os.getenv("OPENAI_STT_MODEL", "whisper-1")
 
+# NPC-Konfiguration
+NPC1_NAME = os.getenv("NPC1_NAME", "NPC 1")
+NPC2_NAME = os.getenv("NPC2_NAME", "NPC 2")
+NPC_CHAT_GAP_SEC = float(os.getenv("NPC_CHAT_GAP_SEC", "8.0"))
+
+def _persona_default(name: str, role: str) -> str:
+    return (
+        f"Du bist {name}, ein {role} in einer futuristischen Stadt. "
+        "Sprich locker, freundlich und auf Deutsch. Reagiere kurz (1-2 Sätze) und geh auf die letzten Aussagen ein."
+    )
+
+NPC_CONFIG: Dict[str, Dict[str, str]] = {
+    "npc1": {
+        "name": NPC1_NAME,
+        "persona": os.getenv(
+            "NPC1_PERSONA",
+            _persona_default(NPC1_NAME, "neugieriger Stadtführer, der Besucher willkommen heißt"),
+        ),
+        "voice_id": os.getenv("ELEVENLABS_VOICE_ID_NPC1", ELEVENLABS_VOICE_ID),
+    },
+    "npc2": {
+        "name": NPC2_NAME,
+        "persona": os.getenv(
+            "NPC2_PERSONA",
+            _persona_default(NPC2_NAME, "entspannter Techniker, der gern Anekdoten erzählt"),
+        ),
+        "voice_id": os.getenv("ELEVENLABS_VOICE_ID_NPC2", os.getenv("ELEVENLABS_ALT_VOICE_ID", ELEVENLABS_VOICE_ID)),
+    },
+}
+
+NPC_IDS = list(NPC_CONFIG.keys())
+NPC_PAIR_KEY = "npcpair:" + ":".join(NPC_IDS)
+PAIR_DB_ID = NPC_PAIR_KEY
+
 # ----------------- libs (robust) ----------------
 _errs: List[str] = []
 try:
@@ -56,13 +90,23 @@ except Exception as e:
 app = FastAPI(title="KI-NPC Bot")
 
 positions_lock = threading.Lock()
-npc_pos = [10.0, 10.0]   # NPC bleibt fix
+npc_positions: Dict[str, List[float]] = {
+    "npc1": [10.0, 10.0],
+    "npc2": [14.0, 10.0],
+}
 players: List[Dict[str, Any]] = []
 
 # per-player Zustand
-# { player_id: { "mode": "idle"|"greeted"|"chatting", "last_seen": ts, "last_listen": ts, "last_interaction": ts } }
+# { player_id: { "mode": "idle"|"chatting", "last_seen": ts, "last_listen": ts, "last_interaction": ts } }
 pstate: Dict[str, Dict[str, float]] = {}
-last_greet_time: Dict[str, float] = {}  # Sicherheitsnetz (nicht für Logik nötig, aber ok)
+npc_pair_state: Dict[str, Dict[str, Any]] = {
+    NPC_PAIR_KEY: {
+        "mode": "idle",
+        "last_exchange": 0.0,
+        "next_speaker": "npc1",
+        "player_last_greet": {},
+    }
+}
 
 log_lines: List[str] = []
 _resolved_out: Optional[int] = None
@@ -135,11 +179,12 @@ def openai_chat(messages: List[Dict[str, str]], max_tokens=128, temp=0.7) -> str
     except Exception as e:
         log(f"OpenAI-Fehler: {e}"); return "Alles klar."
 
-def elevenlabs_tts(text: str) -> Optional[bytes]:
+def elevenlabs_tts(text: str, voice_id: Optional[str] = None) -> Optional[bytes]:
     if not ELEVENLABS_API_KEY or requests is None:
         log("ElevenLabs nicht konfiguriert – kein Audio."); return None
     try:
-        url = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}"
+        vid = (voice_id or ELEVENLABS_VOICE_ID or "").strip() or ELEVENLABS_VOICE_ID
+        url = f"https://api.elevenlabs.io/v1/text-to-speech/{vid}"
         headers = {"xi-api-key": ELEVENLABS_API_KEY, "accept":"audio/mpeg", "Content-Type":"application/json"}
         payload = {"text":text, "model_id":"eleven_multilingual_v2",
                    "voice_settings":{"stability":0.4,"similarity_boost":0.7}}
@@ -251,43 +296,104 @@ def transcribe_wav(wav_bytes: bytes) -> str:
         log(f"STT-Fehler: {e}"); return ""
 
 # ----------------- Dialog-Engine ----------------
-SYS_PROMPT = "Du bist ein freundlicher NPC in einem Spiel. Antworte kurz (1 Satz), natürlich und auf Deutsch. Beziehe dich auf das bisherige Gespräch, bleib hilfreich und nett."
+def ensure_pair_state(pair_key: str) -> Dict[str, Any]:
+    st = npc_pair_state.setdefault(
+        pair_key,
+        {"mode": "idle", "last_exchange": 0.0, "next_speaker": NPC_IDS[0], "player_last_greet": {}},
+    )
+    st.setdefault("player_last_greet", {})
+    if st.get("next_speaker") not in NPC_IDS:
+        st["next_speaker"] = NPC_IDS[0]
+    return st
 
-def make_messages_from_memory(player_id: str, user_utterance: Optional[str]=None) -> List[Dict[str, str]]:
-    msgs = [{"role":"system","content": SYS_PROMPT}]
-    mem = db_get_last(player_id, limit=20)
-    for role, content in mem:
-        msgs.append({"role": "assistant" if role=="assistant" else "user", "content": content})
-    if user_utterance:
-        msgs.append({"role":"user","content": user_utterance})
-    return msgs
+def other_npc(current: str) -> str:
+    for nid in NPC_IDS:
+        if nid != current:
+            return nid
+    return current
 
-def initial_greet(player_id: str, name: str):
-    # Begrüßung nur EINMAL -> danach in "chatting"
-    greet_prompt = f"Jemand namens {name} kommt in 4m Nähe. Sag eine sehr kurze, freundliche Begrüßung (max. 8 Wörter)."
-    text = openai_chat([{"role":"system","content":"Sprich sehr kurz, freundlich, Deutsch."},
-                        {"role":"user","content": greet_prompt}], max_tokens=24)
-    log(f"Greet -> '{text}'")
-    db_add(player_id, "assistant", text)         # Begrüßung in Memory
-    audio = elevenlabs_tts(text or f"Hallo {name}!")
-    if audio: play_audio_bytes_mp3(audio)
+def transcript_from_memory(limit: int = 40) -> str:
+    rows = db_get_last(PAIR_DB_ID, limit=limit)
+    lines: List[str] = []
+    for role, content in rows:
+        if role.startswith("player:"):
+            name = role.split(":", 1)[1] or "Spieler"
+            lines.append(f"Spieler {name}: {content}")
+        else:
+            cfg = NPC_CONFIG.get(role, {"name": role})
+            lines.append(f"{cfg.get('name', role)}: {content}")
+    return "\n".join(lines)
 
-def listen_and_maybe_reply(player_id: str):
-    # Lauschen
+def npc_pair_say(pair_key: str, speaker: str, focus: Optional[str] = None) -> Optional[str]:
+    cfg = NPC_CONFIG.get(speaker)
+    if not cfg:
+        return None
+    transcript = transcript_from_memory()
+    prompt_parts: List[str] = []
+    if transcript:
+        prompt_parts.append("Bisheriger Dialog:\n" + transcript)
+    else:
+        prompt_parts.append("Das Gespräch beginnt gerade – starte locker und natürlich.")
+    if focus:
+        prompt_parts.append(f"Hinweis: {focus}")
+    prompt_parts.append(f"Antworte als {cfg['name']} mit 1-2 kurzen Sätzen auf Deutsch.")
+    messages = [
+        {"role": "system", "content": cfg["persona"]},
+        {"role": "user", "content": "\n\n".join(prompt_parts)},
+    ]
+    reply = openai_chat(messages, max_tokens=120)
+    if not reply:
+        reply = "Alles klar."
+    log(f"{cfg['name']} -> '{reply}'")
+    db_add(PAIR_DB_ID, speaker, reply)
+    audio = elevenlabs_tts(reply, voice_id=cfg.get("voice_id"))
+    if audio:
+        play_audio_bytes_mp3(audio)
+    st = ensure_pair_state(pair_key)
+    st["last_exchange"] = time.time()
+    st["mode"] = "chatting"
+    st["next_speaker"] = other_npc(speaker)
+    npc_pair_state[pair_key] = st
+    return reply
+
+def npc_pair_start(pair_key: str):
+    st = ensure_pair_state(pair_key)
+    if st.get("mode") == "chatting":
+        return
+    log("[NPC-PAIR] Gespräch startet")
+    st["mode"] = "chatting"
+    st["next_speaker"] = NPC_IDS[0]
+    npc_pair_state[pair_key] = st
+    npc_pair_say(pair_key, NPC_IDS[0], focus=f"Beginne das Gespräch mit {NPC_CONFIG[NPC_IDS[1]]['name']}.")
+    npc_pair_say(pair_key, NPC_IDS[1], focus=f"Reagiere direkt auf {NPC_CONFIG[NPC_IDS[0]]['name']} und halte das Gespräch in Gang.")
+
+def npc_pair_pause(pair_key: str):
+    st = ensure_pair_state(pair_key)
+    if st.get("mode") != "idle":
+        log("[NPC-PAIR] Gespräch pausiert (zu weit entfernt)")
+    st["mode"] = "idle"
+    npc_pair_state[pair_key] = st
+
+def npc_pair_greet_player(pair_key: str, player_id: str, player_name: str):
+    st = ensure_pair_state(pair_key)
+    speaker = st.get("next_speaker") or NPC_IDS[0]
+    npc_pair_say(pair_key, speaker, focus=f"Begrüße freundlich den Spieler namens {player_name}, der gerade dazu stößt.")
+    st = ensure_pair_state(pair_key)
+    st.setdefault("player_last_greet", {})[player_id] = time.time()
+    npc_pair_state[pair_key] = st
+
+def handle_player_speech(pair_key: str, player_id: str, player_name: str) -> bool:
     wav = record_input_wav_bytes(LISTEN_DURATION_SEC)
-    if not wav: return False
-    user_text = transcribe_wav(wav)
-    if not user_text: 
+    if not wav:
         return False
-    db_add(player_id, "user", user_text)
-
-    # Antworten mit Memory-Kontext
-    msgs = make_messages_from_memory(player_id)
-    reply = openai_chat(msgs, max_tokens=96)
-    log(f"Reply -> '{reply}'")
-    db_add(player_id, "assistant", reply)
-    audio2 = elevenlabs_tts(reply or "Alles klar.")
-    if audio2: play_audio_bytes_mp3(audio2)
+    user_text = transcribe_wav(wav)
+    if not user_text:
+        return False
+    db_add(PAIR_DB_ID, f"player:{player_id}", user_text)
+    st = ensure_pair_state(pair_key)
+    speaker = st.get("next_speaker") or NPC_IDS[0]
+    focus = f"Der Spieler {player_name} sagt: '{user_text}'. Antworte direkt darauf."
+    npc_pair_say(pair_key, speaker, focus=focus)
     return True
 
 # ----------------- HTTP-API ---------------------
@@ -297,17 +403,26 @@ def health(): return {"ok": True, "bot": "proximity"}
 @app.get("/state")
 def state():
     with positions_lock:
-        return {"npc":{"x":npc_pos[0],"y":npc_pos[1]},
-                "players":players,
-                "radius":GREET_RADIUS,
-                "sr":TARGET_SR,
-                "resolved_out": _resolved_out,
-                "resolved_in": _resolved_in,
-                "lib_errors": _errs,
-                "openai_model": OPENAI_MODEL,
-                "stt_model": OPENAI_STT_MODEL,
-                "listen_sec": LISTEN_DURATION_SEC,
-                "sessions": pstate}
+        npc_list = [
+            {"id": nid, "name": NPC_CONFIG.get(nid, {}).get("name", nid), "x": pos[0], "y": pos[1]}
+            for nid, pos in npc_positions.items()
+        ]
+        pl = list(players)
+    pair_info = ensure_pair_state(NPC_PAIR_KEY)
+    return {
+        "npcs": npc_list,
+        "players": pl,
+        "radius": GREET_RADIUS,
+        "sr": TARGET_SR,
+        "resolved_out": _resolved_out,
+        "resolved_in": _resolved_in,
+        "lib_errors": _errs,
+        "openai_model": OPENAI_MODEL,
+        "stt_model": OPENAI_STT_MODEL,
+        "listen_sec": LISTEN_DURATION_SEC,
+        "sessions": pstate,
+        "pair_state": pair_info,
+    }
 
 @app.get("/log")
 def get_log(): return {"lines": log_lines[-160:]}
@@ -331,7 +446,9 @@ def memory(player_id: str):
 def reset(player_id: str):
     db_reset(player_id)
     pstate.pop(player_id, None)
-    last_greet_time.pop(player_id, None)
+    st = ensure_pair_state(NPC_PAIR_KEY)
+    st.get("player_last_greet", {}).pop(player_id, None)
+    npc_pair_state[NPC_PAIR_KEY] = st
     return {"ok": True}
 
 @app.post("/set_out/{idx}")
@@ -362,23 +479,33 @@ def set_in(idx: int):
 async def update(req: Request):
     """
     payload = {
-      "npc": {"x": float, "y": float},   # wird ignoriert (NPC bleibt fest)
+      "npcs": [{"id": "npc1", "x": float, "y": float}, ...],
       "players": [{"id": "...", "name": "...", "x": float, "y": float}, ...]
     }
     """
     data = await req.json()
     ps = data.get("players", [])
+    npcs_in = data.get("npcs", [])
     if not isinstance(ps, list):
         return JSONResponse({"error":"Invalid payload"}, status_code=400)
     with positions_lock:
-        # NPC-Position bleibt unverändert
+        if isinstance(npcs_in, list):
+            for n in npcs_in:
+                try:
+                    nid = str(n.get("id", ""))
+                    if nid in npc_positions:
+                        npc_positions[nid][0] = float(n.get("x", npc_positions[nid][0]))
+                        npc_positions[nid][1] = float(n.get("y", npc_positions[nid][1]))
+                except Exception:
+                    pass
         norm = []
         for p in ps:
             try:
                 norm.append({"id": str(p.get("id","p?")),
                              "name": (p.get("name") or p.get("id") or "Spieler"),
                              "x": float(p.get("x",0.0)), "y": float(p.get("y",0.0))})
-            except: pass
+            except Exception:
+                pass
         players.clear(); players.extend(norm)
     return {"ok": True}
 
@@ -389,48 +516,57 @@ def proximity_loop():
         try:
             now = time.time()
             with positions_lock:
-                npc = (npc_pos[0], npc_pos[1]); ps = list(players)
+                npc_copy = {nid: tuple(pos) for nid, pos in npc_positions.items()}
+                ps = list(players)
+            npc1 = npc_copy.get("npc1", (0.0, 0.0))
+            npc2 = npc_copy.get("npc2", (0.0, 0.0))
+            pair_state = ensure_pair_state(NPC_PAIR_KEY)
+            dist_pair = dist2(npc1, npc2)
+            if dist_pair <= GREET_RADIUS:
+                if pair_state.get("mode") != "chatting":
+                    npc_pair_start(NPC_PAIR_KEY)
+                    pair_state = ensure_pair_state(NPC_PAIR_KEY)
+                elif (now - pair_state.get("last_exchange", 0)) >= NPC_CHAT_GAP_SEC:
+                    next_speaker = pair_state.get("next_speaker") or NPC_IDS[0]
+                    npc_pair_say(NPC_PAIR_KEY, next_speaker)
+                    pair_state = ensure_pair_state(NPC_PAIR_KEY)
+            else:
+                npc_pair_pause(NPC_PAIR_KEY)
+                pair_state = ensure_pair_state(NPC_PAIR_KEY)
+
             for p in ps:
-                name = p.get("name","Spieler")
-                pid  = p.get("id", name)
-                d = dist2(npc, (p["x"], p["y"]))
-                st = pstate.get(pid, {"mode":"idle", "last_seen":0, "last_listen":0, "last_interaction":0})
-                # Update last_seen immer, wenn in Reichweite
-                if d <= GREET_RADIUS:
+                name = p.get("name", "Spieler")
+                pid = p.get("id", name)
+                st = pstate.get(pid, {"mode": "idle", "last_seen": 0, "last_listen": 0, "last_interaction": 0})
+                player_pos = (p.get("x", 0.0), p.get("y", 0.0))
+                min_dist = min(dist2(npc1, player_pos), dist2(npc2, player_pos))
+                pair_active = ensure_pair_state(NPC_PAIR_KEY).get("mode") == "chatting"
+                if min_dist <= GREET_RADIUS and pair_active:
                     st["last_seen"] = now
-                    # Session-Start?
                     if st["mode"] == "idle":
-                        # kein erneutes Begrüßen wenn kurz vorher bereits gegrüßt (Sicherheitsnetz)
-                        if (now - last_greet_time.get(pid, 0)) >= 3.0:
-                            last_greet_time[pid] = now
-                            log(f"[SESSION] start -> {pid} ({name}) dist={d:.2f}")
-                            initial_greet(pid, name)
+                        last_greet = ensure_pair_state(NPC_PAIR_KEY)["player_last_greet"].get(pid, 0)
+                        if (now - last_greet) >= 5.0:
+                            log(f"[PLAYER] join -> {pid} dist={min_dist:.2f}")
+                            npc_pair_greet_player(NPC_PAIR_KEY, pid, name)
                         st["mode"] = "chatting"
                         st["last_interaction"] = now
                         pstate[pid] = st
                         continue
 
-                    # Chatting: zyklisch lauschen -> wenn Spieler was sagt, antworten
-                    if st["mode"] == "chatting":
-                        if (now - st.get("last_listen", 0)) >= INTER_LISTEN_GAP:
-                            st["last_listen"] = now
-                            pstate[pid] = st
-                            said = listen_and_maybe_reply(pid)
-                            if said:
-                                st["last_interaction"] = time.time()
-                                pstate[pid] = st
-                else:
-                    # Außerhalb des Radius: nichts tun, aber ggf. Timeout prüfen (weiter unten)
-                    pass
-
-                # Konversations-Timeout
-                if st["mode"] != "idle":
-                    idle_for = now - max(st.get("last_seen",0), st.get("last_interaction",0))
-                    if idle_for >= CONVO_INACTIVITY_TIMEOUT:
-                        log(f"[SESSION] end -> {pid} idle {idle_for:.1f}s")
-                        st["mode"] = "idle"
+                    if st["mode"] == "chatting" and (now - st.get("last_listen", 0)) >= INTER_LISTEN_GAP:
+                        st["last_listen"] = now
                         pstate[pid] = st
-                        # Memory bleibt erhalten (gewollt)
+                        said = handle_player_speech(NPC_PAIR_KEY, pid, name)
+                        if said:
+                            st["last_interaction"] = time.time()
+                            pstate[pid] = st
+                else:
+                    if st["mode"] != "idle":
+                        idle_for = now - max(st.get("last_seen", 0), st.get("last_interaction", 0))
+                        if idle_for >= CONVO_INACTIVITY_TIMEOUT:
+                            log(f"[PLAYER] end -> {pid} idle {idle_for:.1f}s")
+                            st["mode"] = "idle"
+                            pstate[pid] = st
 
         except Exception as e:
             log(f"Loop-Fehler: {e}")
