@@ -20,8 +20,9 @@ app = FastAPI(title="KI-NPC Mini-Map")
 # NPC fix auf (10,10); nur Spieler bewegbar
 state = {
     "npcs": [
-        {"id": "npc1", "name": "NPC 1", "x": 10.0, "y": 10.0},
-        {"id": "npc2", "name": "NPC 2", "x": 14.0, "y": 10.0},
+        {"id": "npc1", "name": "Moderator", "x": 10.0, "y": 10.0},
+        {"id": "npc2", "name": "NPC 1", "x": 14.0, "y": 10.0},
+        {"id": "npc3", "name": "NPC 2", "x": 18.0, "y": 10.0},
     ],
     "players": [{"id": "p1", "name": "Spieler1", "x": 18.0, "y": 14.0}],
 }
@@ -79,24 +80,36 @@ def toggle_push():
 
 @app.get("/", response_class=HTMLResponse)
 def index():
-    html = """
-<!doctype html><html><head><meta charset="utf-8"/><title>Mini-Map</title>
+    html = """<!doctype html><html><head><meta charset="utf-8"/><title>Mini-Map</title>
 <style>
 body { font-family: ui-sans-serif, system-ui; margin:0; display:flex; height:100vh; color:#e5e7eb; }
 #left { flex:1; display:flex; align-items:center; justify-content:center; background:#0b1220; padding:16px; box-sizing:border-box; }
-#right { width:380px; background:#111827; padding:16px; overflow:auto; box-sizing:border-box; }
+#right { width:420px; background:#111827; padding:16px; overflow:auto; box-sizing:border-box; }
 canvas { background:#0f172a; border:1px solid #374151; border-radius:8px; box-shadow:0 10px 30px rgba(0,0,0,0.35); }
-button { margin-right:8px; margin-bottom:8px; background:#2563eb; border:none; color:#e5e7eb; padding:6px 10px; border-radius:6px; cursor:pointer; }
+button { margin-right:8px; margin-bottom:8px; background:#2563eb; border:none; color:#e5e7eb; padding:6px 10px; border-radius:6px; cursor:pointer; transition:background 0.2s ease; }
 button.secondary { background:#374151; }
+button:disabled { opacity:0.55; cursor:not-allowed; }
 .row { margin:12px 0; }
 .row h3 { margin:0 0 6px 0; font-size:1rem; color:#93c5fd; }
 code { background:#1f2937; padding:2px 6px; border-radius:4px; display:inline-block; margin-top:4px; }
-label { display:block; font-size:0.85rem; margin-bottom:2px; color:#9ca3af; }
-select { width:100%; padding:6px; border-radius:6px; background:#1f2937; color:#e5e7eb; border:1px solid #374151; margin-bottom:6px; }
+label { display:block; font-size:0.85rem; margin-bottom:4px; color:#9ca3af; }
+select, textarea { width:100%; padding:6px; border-radius:6px; background:#1f2937; color:#e5e7eb; border:1px solid #374151; margin-bottom:6px; font-family:inherit; box-sizing:border-box; }
+textarea { resize:vertical; }
 small { color:#9ca3af; }
 ul { list-style:none; padding-left:16px; margin:0; }
 li { margin:2px 0; font-size:0.9rem; }
 .status { font-size:0.85rem; color:#9ca3af; }
+.button-row { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:6px; }
+.npc-prompts { display:flex; flex-direction:column; gap:10px; }
+.prompt-block { background:#151c2f; border:1px solid #1f2937; border-radius:8px; padding:8px; }
+.prompt-block label { font-size:0.8rem; text-transform:uppercase; letter-spacing:0.04em; color:#c7d2fe; margin-bottom:4px; }
+#conversationLog { background:#0f172a; border:1px solid #1f2937; border-radius:8px; padding:10px; max-height:240px; overflow-y:auto; font-size:0.9rem; }
+.log-entry { margin-bottom:6px; line-height:1.4; }
+.log-entry:last-child { margin-bottom:0; }
+.log-entry strong { color:#bfdbfe; }
+#finalSolution { margin-top:10px; padding:10px; border-radius:8px; border:1px solid rgba(37,99,235,0.5); background:#1d283a; color:#facc15; font-weight:600; display:none; }
+#finalSolution.visible { display:block; }
+.small-note { font-size:0.8rem; color:#6b7280; margin-bottom:6px; }
 </style></head><body>
 <div id="left"><canvas id="map" width="600" height="420"></canvas></div>
 <div id="right">
@@ -104,6 +117,36 @@ li { margin:2px 0; font-size:0.9rem; }
   <div class="row">Bot Update URL:<br><code id="cfg"></code></div>
   <div class="row"><button id="toggle">Push an/aus</button><button id="pushonce" class="secondary">Push einmal</button></div>
   <div class="row"><div>Letzter Push: <span id="last"></span></div><div>Push aktiv: <span id="active"></span></div></div>
+  <div class="row">
+    <h3>Gesprächssteuerung</h3>
+    <div class="button-row">
+      <button id="startConversation">Start</button>
+      <button id="stopConversation" class="secondary" disabled>Stop</button>
+      <button id="resetConversation" class="secondary">Refresh</button>
+    </div>
+    <label for="taskDescription">Aufgabenstellung</label>
+    <textarea id="taskDescription" rows="3" placeholder="Beschreibe die Aufgabe, die moderiert werden soll..."></textarea>
+    <div class="small-note">Trage hier die Anforderungen und die Persönlichkeit der NPCs als System-Prompt ein.</div>
+    <div class="npc-prompts">
+      <div class="prompt-block">
+        <label for="prompt-moderator">Moderator (NPC 1)</label>
+        <textarea id="prompt-moderator" data-npc-prompt="npc1" rows="3">Ruhig, strukturiert und wertschätzend. Fasse Ergebnisse klar zusammen und achte auf einen respektvollen Ton.</textarea>
+      </div>
+      <div class="prompt-block">
+        <label for="prompt-npc2">NPC 1</label>
+        <textarea id="prompt-npc2" data-npc-prompt="npc2" rows="3">Analytisch, detailverliebt und lösungsorientiert. Denkt logisch und mag Schritt-für-Schritt-Pläne.</textarea>
+      </div>
+      <div class="prompt-block">
+        <label for="prompt-npc3">NPC 2</label>
+        <textarea id="prompt-npc3" data-npc-prompt="npc3" rows="3">Kreativ, intuitiv und empathisch. Bringt frische Ideen ein und achtet auf zwischenmenschliche Aspekte.</textarea>
+      </div>
+    </div>
+  </div>
+  <div class="row">
+    <h3>Gesprächsverlauf</h3>
+    <div id="conversationLog"></div>
+    <div id="finalSolution"></div>
+  </div>
   <div class="row">
     <h3>Entfernungen (Meter)</h3>
     <ul id="distances"></ul>
@@ -124,19 +167,35 @@ li { margin:2px 0; font-size:0.9rem; }
     <a href="http://__BOT_HOST__:__BOT_PORT__/log" target="_blank">Bot /log</a><br/>
     <a href="http://__BOT_HOST__:__BOT_PORT__/devices" target="_blank">Bot /devices</a>
   </div>
-  <div class="row"><small>Ziehe die Marker für NPC&nbsp;1 (cyan), NPC&nbsp;2 (gelb) und Spieler (lila), um Positionen festzulegen.</small></div>
+  <div class="row"><small>Ziehe die Marker für Moderator (cyan), NPC&nbsp;1 (gelb) und NPC&nbsp;2 (grün) sowie Spieler (lila), um Positionen festzulegen.</small></div>
 </div>
 <script>
 const canvas = document.getElementById('map');
 const ctx = canvas.getContext('2d');
 const SCALE = 12;
 const BOT_BASE = `http://__BOT_HOST__:__BOT_PORT__`;
-const NPC_COLORS = ['#22d3ee', '#fbbf24'];
+const NPC_COLORS = ['#38bdf8', '#fbbf24', '#34d399'];
 const PLAYER_COLOR = '#a78bfa';
 let npcs = [];
 let players = [];
 let greetRadius = 4.0;
 let dragging = null;
+let suspendRefresh = false;
+
+const conversationState = {
+  running: false,
+  stopRequested: false,
+  clearOnStop: false,
+  solutions: {},
+  compromiseRound: 0,
+  finalSolution: ''
+};
+
+class ConversationAbort extends Error {
+  constructor() {
+    super('conversation aborted');
+  }
+}
 
 function canvasPosToWorld(e) {
   const rect = canvas.getBoundingClientRect();
@@ -172,7 +231,7 @@ function draw() {
   ctx.fillText('1 Kästchen = 2 m', 10, 20);
 
   npcs.forEach((npc, idx) => {
-    drawCircle(npc.x, npc.y, greetRadius, 'rgba(34,211,238,0.1)');
+    drawCircle(npc.x, npc.y, greetRadius, 'rgba(56,189,248,0.08)');
     ctx.fillStyle = NPC_COLORS[idx % NPC_COLORS.length];
     ctx.beginPath();
     ctx.arc(npc.x * SCALE, npc.y * SCALE, 9, 0, Math.PI * 2);
@@ -194,11 +253,15 @@ function draw() {
 function updateDistances() {
   const list = document.getElementById('distances');
   list.innerHTML = '';
-  if (npcs.length >= 2) {
-    const d = Math.hypot(npcs[0].x - npcs[1].x, npcs[0].y - npcs[1].y).toFixed(2);
-    const li = document.createElement('li');
-    li.textContent = `${npcs[0].name || 'NPC1'} ↔ ${npcs[1].name || 'NPC2'}: ${d} m`;
-    list.appendChild(li);
+  for (let i = 0; i < npcs.length; i++) {
+    for (let j = i + 1; j < npcs.length; j++) {
+      const npcA = npcs[i];
+      const npcB = npcs[j];
+      const d = Math.hypot(npcA.x - npcB.x, npcA.y - npcB.y).toFixed(2);
+      const li = document.createElement('li');
+      li.textContent = `${npcA.name || npcA.id} ↔ ${npcB.name || npcB.id}: ${d} m`;
+      list.appendChild(li);
+    }
   }
   players.forEach((pl) => {
     npcs.forEach((npc) => {
@@ -258,7 +321,8 @@ canvas.addEventListener('mousemove', async (e) => {
 
 ['mouseup','mouseleave'].forEach((ev) => canvas.addEventListener(ev, () => { dragging = null; }));
 
-async function refreshLocal() {
+async function refreshLocal(force=false) {
+  if (suspendRefresh && !force) return null;
   try {
     const r = await fetch('/state_mini');
     const s = await r.json();
@@ -268,8 +332,10 @@ async function refreshLocal() {
     document.getElementById('active').textContent = s.push_enabled ? 'AN' : 'AUS';
     updateDistances();
     draw();
+    return s;
   } catch (err) {
     console.error('state_mini fehlgeschlagen', err);
+    return null;
   }
 }
 
@@ -351,6 +417,338 @@ async function refreshBotState() {
   }
 }
 
+function getNpcById(id) {
+  return npcs.find((npc) => npc.id === id) || null;
+}
+
+function getNpcName(id) {
+  const npc = getNpcById(id);
+  return npc ? (npc.name || npc.id) : id;
+}
+
+function describePrompt(prompt) {
+  if (!prompt) return 'einen neutralen Ansatz verfolgt';
+  const sentences = prompt.split(/\r?\n|[.!?]/).map((s) => s.trim()).filter(Boolean);
+  const first = sentences.length ? sentences[0] : prompt.trim();
+  return first.length > 140 ? `${first.slice(0, 137)}...` : first;
+}
+
+function getPromptForNpc(id) {
+  const el = document.querySelector(`[data-npc-prompt="${id}"]`);
+  return el ? el.value.trim() : '';
+}
+
+function appendLog(message, speaker=null) {
+  const log = document.getElementById('conversationLog');
+  if (!log) return;
+  const entry = document.createElement('div');
+  entry.className = 'log-entry';
+  if (speaker) {
+    const strong = document.createElement('strong');
+    strong.textContent = `${speaker}: `;
+    entry.appendChild(strong);
+    entry.appendChild(document.createTextNode(message));
+  } else {
+    entry.textContent = message;
+  }
+  log.appendChild(entry);
+  log.scrollTop = log.scrollHeight;
+}
+
+function updateFinalSolution(text) {
+  const finalEl = document.getElementById('finalSolution');
+  if (!finalEl) return;
+  if (text) {
+    finalEl.textContent = text;
+    finalEl.classList.add('visible');
+  } else {
+    finalEl.textContent = '';
+    finalEl.classList.remove('visible');
+  }
+}
+
+function clearConversationUI() {
+  const log = document.getElementById('conversationLog');
+  if (log) log.innerHTML = '';
+  updateFinalSolution('');
+  conversationState.solutions = {};
+  conversationState.compromiseRound = 0;
+  conversationState.finalSolution = '';
+}
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function checkForAbort() {
+  if (conversationState.stopRequested) {
+    throw new ConversationAbort();
+  }
+}
+
+async function sendMove(id, x, y) {
+  try {
+    await fetch('/move', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ who: id, x, y })
+    });
+  } catch (err) {
+    console.warn('Konnte Bewegung nicht senden', err);
+  }
+}
+
+function computeMeetingPoint(moderator, target) {
+  if (!moderator || !target) return null;
+  const dx = target.x - moderator.x;
+  const offsetX = dx >= 0 ? -0.9 : 0.9;
+  const offsetY = 0.8;
+  return { x: target.x + offsetX, y: target.y + offsetY };
+}
+
+function computeCelebrationPoint() {
+  return { x: 12, y: 8 };
+}
+
+async function animateMoveNpc(id, destination, duration = 2600) {
+  const npc = getNpcById(id);
+  if (!npc || !destination) return;
+  const steps = Math.max(10, Math.floor(duration / 90));
+  const startX = npc.x;
+  const startY = npc.y;
+  const targetX = destination.x;
+  const targetY = destination.y;
+  const stepDuration = duration / steps;
+  suspendRefresh = true;
+  try {
+    for (let step = 1; step <= steps; step++) {
+      checkForAbort();
+      const t = step / steps;
+      npc.x = startX + (targetX - startX) * t;
+      npc.y = startY + (targetY - startY) * t;
+      draw();
+      updateDistances();
+      await wait(stepDuration);
+    }
+  } finally {
+    suspendRefresh = false;
+  }
+  checkForAbort();
+  await sendMove(id, npc.x, npc.y);
+  await refreshLocal(true);
+}
+
+function createProposal(id, task) {
+  const name = getNpcName(id);
+  const promptSummary = describePrompt(getPromptForNpc(id));
+  const baseTask = task ? `für "${task}"` : 'für die aktuelle Aufgabe';
+  return `${name} schlägt ${baseTask} eine Lösung vor, die ${promptSummary.toLowerCase()}.`;
+}
+
+function createOpinion(id, otherName, otherSolution) {
+  const name = getNpcName(id);
+  const promptSummary = describePrompt(getPromptForNpc(id));
+  const stance = promptSummary.toLowerCase().includes('kritisch') ? 'kritisch' : 'aufgeschlossen';
+  return `${name} bewertet den Vorschlag von ${otherName} ${stance} und möchte dabei sicherstellen, dass ${promptSummary.toLowerCase()}.`;
+}
+
+function createSharedSolution(task) {
+  const base = task ? `Gemeinsame Lösung für "${task}":` : 'Gemeinsame Lösung:';
+  const styleA = describePrompt(getPromptForNpc('npc2')).toLowerCase();
+  const styleB = describePrompt(getPromptForNpc('npc3')).toLowerCase();
+  return `${base} Wir kombinieren ${styleA} mit ${styleB}, damit sich beide Ansätze ergänzen.`;
+}
+
+function createCompromise(id, otherName, otherSolution, task) {
+  if (conversationState.compromiseRound >= 2 || (otherSolution && otherSolution.startsWith('Gemeinsame Lösung'))) {
+    const shared = createSharedSolution(task);
+    conversationState.finalSolution = shared;
+    return shared;
+  }
+  const name = getNpcName(id);
+  const promptSummary = describePrompt(getPromptForNpc(id));
+  return `${name} schlägt vor, wichtige Elemente von ${otherName} zu übernehmen und sie mit dem eigenen Stil (${promptSummary.toLowerCase()}) zu verbinden.`;
+}
+
+function solutionsAligned(a, b) {
+  if (!a || !b) return false;
+  return a.trim().toLowerCase() === b.trim().toLowerCase();
+}
+
+async function approachNpc(targetId, message) {
+  const moderator = getNpcById('npc1');
+  const target = getNpcById(targetId);
+  if (!moderator || !target) return;
+  const targetName = getNpcName(targetId);
+  appendLog(`Ich komme zu dir, ${targetName}.`, getNpcName('npc1'));
+  const meetPoint = computeMeetingPoint(moderator, target);
+  await animateMoveNpc('npc1', meetPoint);
+  checkForAbort();
+  if (message) {
+    appendLog(message, getNpcName('npc1'));
+  }
+}
+
+function setControlsRunning(running) {
+  if (startBtn) startBtn.disabled = running;
+  if (stopBtn) stopBtn.disabled = !running;
+}
+
+async function runConversation() {
+  if (conversationState.running) return;
+  conversationState.running = true;
+  conversationState.stopRequested = false;
+  conversationState.clearOnStop = false;
+  conversationState.solutions = {};
+  conversationState.compromiseRound = 0;
+  conversationState.finalSolution = '';
+  setControlsRunning(true);
+  const task = document.getElementById('taskDescription').value.trim();
+  const moderatorName = getNpcName('npc1');
+  const npcA = 'npc2';
+  const npcB = 'npc3';
+  const npcAName = getNpcName(npcA);
+  const npcBName = getNpcName(npcB);
+  try {
+    await refreshLocal(true);
+    appendLog(`Ich moderiere jetzt die Aufgabe${task ? ` "${task}"` : ''}.`, moderatorName);
+    await approachNpc(npcA, `Was ist aus deiner Sicht die beste Lösung${task ? ` für "${task}"` : ''}?`);
+    checkForAbort();
+    conversationState.solutions[npcA] = createProposal(npcA, task);
+    appendLog(conversationState.solutions[npcA], npcAName);
+    await wait(900);
+    checkForAbort();
+
+    await approachNpc(npcB, `Und was ist deine beste Lösung${task ? ` für "${task}"` : ''}?`);
+    checkForAbort();
+    conversationState.solutions[npcB] = createProposal(npcB, task);
+    appendLog(conversationState.solutions[npcB], npcBName);
+    await wait(900);
+    checkForAbort();
+
+    await approachNpc(npcA, `Hier ist der Vorschlag von ${npcBName}. Was hältst du davon?`);
+    checkForAbort();
+    appendLog(createOpinion(npcA, npcBName, conversationState.solutions[npcB]), npcAName);
+    await wait(800);
+    checkForAbort();
+
+    await approachNpc(npcB, `Und ${npcAName} empfiehlt Folgendes. Wie siehst du das?`);
+    checkForAbort();
+    appendLog(createOpinion(npcB, npcAName, conversationState.solutions[npcA]), npcBName);
+    await wait(800);
+    checkForAbort();
+
+    while (!solutionsAligned(conversationState.solutions[npcA], conversationState.solutions[npcB])) {
+      conversationState.compromiseRound += 1;
+
+      await approachNpc(npcA, 'Lasst uns einen gemeinsamen Nenner finden. Hast du einen Kompromissvorschlag?');
+      checkForAbort();
+      conversationState.solutions[npcA] = createCompromise(npcA, npcBName, conversationState.solutions[npcB], task);
+      appendLog(conversationState.solutions[npcA], npcAName);
+      await wait(900);
+      checkForAbort();
+
+      if (solutionsAligned(conversationState.solutions[npcA], conversationState.solutions[npcB])) {
+        break;
+      }
+
+      await approachNpc(npcB, 'Was wäre für dich ein tragfähiger Kompromiss?');
+      checkForAbort();
+      conversationState.solutions[npcB] = createCompromise(npcB, npcAName, conversationState.solutions[npcA], task);
+      appendLog(conversationState.solutions[npcB], npcBName);
+      await wait(900);
+      checkForAbort();
+
+      if (conversationState.compromiseRound >= 3 && !solutionsAligned(conversationState.solutions[npcA], conversationState.solutions[npcB])) {
+        const shared = createSharedSolution(task);
+        conversationState.solutions[npcA] = shared;
+        conversationState.solutions[npcB] = shared;
+        appendLog(shared, npcAName);
+        appendLog(shared, npcBName);
+        break;
+      }
+    }
+
+    if (solutionsAligned(conversationState.solutions[npcA], conversationState.solutions[npcB])) {
+      const finalIdea = conversationState.solutions[npcA];
+      conversationState.finalSolution = finalIdea;
+      await animateMoveNpc('npc1', computeCelebrationPoint(), 2000);
+      appendLog('Fantastisch! Wir haben eine gemeinsame Lösung gefunden!', moderatorName);
+      appendLog(`Endergebnis: ${finalIdea}`, moderatorName);
+      updateFinalSolution(finalIdea);
+    }
+  } catch (err) {
+    if (err instanceof ConversationAbort) {
+      appendLog('Das Gespräch wurde angehalten.', moderatorName);
+    } else {
+      console.error('Fehler im Gespräch', err);
+      appendLog('Es ist ein Fehler im Gespräch aufgetreten.', 'System');
+    }
+  } finally {
+    setControlsRunning(false);
+    const shouldClear = conversationState.clearOnStop;
+    conversationState.running = false;
+    conversationState.stopRequested = false;
+    if (shouldClear) {
+      conversationState.clearOnStop = false;
+      clearConversationUI();
+    }
+  }
+}
+
+function requestStop(clear=false, message=null) {
+  if (!conversationState.running) {
+    if (clear) {
+      clearConversationUI();
+    }
+    return;
+  }
+  conversationState.stopRequested = true;
+  conversationState.clearOnStop = clear;
+  if (message) {
+    appendLog(message, getNpcName('npc1'));
+  }
+}
+
+const startBtn = document.getElementById('startConversation');
+const stopBtn = document.getElementById('stopConversation');
+const resetBtn = document.getElementById('resetConversation');
+
+startBtn.addEventListener('click', () => {
+  runConversation();
+});
+
+stopBtn.addEventListener('click', () => {
+  if (!conversationState.running) return;
+  requestStop(false, 'Ich stoppe das Gespräch für den Moment.');
+});
+
+resetBtn.addEventListener('click', () => {
+  if (conversationState.running) {
+    requestStop(true, 'Gespräch wird zurückgesetzt.');
+  } else {
+    clearConversationUI();
+  }
+});
+
+setControlsRunning(false);
+
+const promptFields = document.querySelectorAll('[data-npc-prompt]');
+promptFields.forEach((field) => {
+  const key = `npc_prompt_${field.dataset.npcPrompt}`;
+  const stored = window.localStorage ? window.localStorage.getItem(key) : null;
+  if (stored) field.value = stored;
+  field.addEventListener('input', () => {
+    try {
+      if (window.localStorage) {
+        window.localStorage.setItem(key, field.value);
+      }
+    } catch (err) {
+      console.warn('Konnte Prompt nicht speichern', err);
+    }
+  });
+});
+
 document.getElementById('toggle').onclick = async () => { await fetch('/toggle_push', { method: 'POST' }); refreshLocal(); };
 document.getElementById('pushonce').onclick = async () => { await fetch('/push_once', { method: 'POST' }); refreshLocal(); };
 document.getElementById('refreshDevices').onclick = () => refreshDevices();
@@ -373,14 +771,15 @@ document.getElementById('speakerSelect').addEventListener('change', async (e) =>
   }
 });
 
-setInterval(refreshLocal, 800);
+setInterval(() => refreshLocal(), 800);
 setInterval(refreshBotState, 4000);
 loadCfg();
 refreshLocal();
 refreshBotState();
 refreshDevices(false);
 draw();
-</script></body></html>"""
+</script></body></html>
+"""
     return HTMLResponse(html.replace("__BOT_HOST__", BOT_HOST).replace("__BOT_PORT__", str(BOT_PORT)))
 
 async def _push_positions():
