@@ -330,13 +330,25 @@ canvas.addEventListener('mousemove', async (e) => {
 
 ['mouseup','mouseleave'].forEach((ev) => canvas.addEventListener(ev, () => { dragging = null; }));
 
+function ensureDefaults(list, defaults) {
+  const result = list.map((item) => ({ ...item }));
+  defaults.forEach((def) => {
+    if (!result.some((item) => item.id === def.id)) {
+      result.push({ ...def });
+    }
+  });
+  return result;
+}
+
 async function refreshLocal(force=false) {
   if (suspendRefresh && !force) return null;
   try {
     const r = await fetch('/state_mini');
     const s = await r.json();
-    npcs = (s.npcs && s.npcs.length ? s.npcs : DEFAULT_NPCS).map((npc) => ({ ...npc }));
-    players = (s.players && s.players.length ? s.players : DEFAULT_PLAYERS).map((player) => ({ ...player }));
+    const npcList = (s.npcs && s.npcs.length ? s.npcs : DEFAULT_NPCS).map((npc) => ({ ...npc }));
+    const playerList = (s.players && s.players.length ? s.players : DEFAULT_PLAYERS).map((player) => ({ ...player }));
+    npcs = ensureDefaults(npcList, DEFAULT_NPCS);
+    players = ensureDefaults(playerList, DEFAULT_PLAYERS);
     document.getElementById('last').textContent = s.last_push_ok ? (`OK: ${s.last_push_msg}`) : (`Fehler: ${s.last_push_msg}`);
     document.getElementById('active').textContent = s.push_enabled ? 'AN' : 'AUS';
     updateDistances();
@@ -592,6 +604,46 @@ function solutionsAligned(a, b) {
   return a.trim().toLowerCase() === b.trim().toLowerCase();
 }
 
+function tokenizeSolution(text) {
+  if (!text) return [];
+  return text
+    .toLowerCase()
+    .replace(/[^a-zäöüß0-9 \t\n\r]/gi, ' ')
+    .split(/[ \t\n\r]+/)
+    .filter((word) => word.length > 1);
+}
+
+function compareSolutions(a, b) {
+  const wordsA = new Set(tokenizeSolution(a));
+  const wordsB = new Set(tokenizeSolution(b));
+  if (!wordsA.size || !wordsB.size) {
+    return {
+      score: 0,
+      summary: 'Ich kann die Vorschläge kaum vergleichen, da sie sehr unterschiedlich beschrieben wurden.',
+    };
+  }
+  let intersection = 0;
+  wordsA.forEach((word) => {
+    if (wordsB.has(word)) intersection += 1;
+  });
+  const union = new Set([...wordsA, ...wordsB]);
+  const ratio = union.size ? intersection / union.size : 0;
+  let verdict;
+  if (ratio >= 0.75) {
+    verdict = 'Die beiden Vorschläge sind nahezu identisch in ihren Kernaussagen.';
+  } else if (ratio >= 0.5) {
+    verdict = 'Es gibt viele Überschneidungen – ihr seid euch in weiten Teilen einig.';
+  } else if (ratio >= 0.3) {
+    verdict = 'Einige Aspekte ähneln sich, aber die Schwerpunkte unterscheiden sich noch spürbar.';
+  } else {
+    verdict = 'Eure Sichtweisen gehen deutlich auseinander und betonen ganz andere Punkte.';
+  }
+  return {
+    score: ratio,
+    summary: `${verdict} (Ähnlichkeit: ${(ratio * 100).toFixed(0)}%)`,
+  };
+}
+
 async function approachNpc(targetId, message) {
   const moderator = getNpcById('npc1');
   const target = getNpcById(targetId);
@@ -634,71 +686,27 @@ async function runConversation() {
   try {
     await refreshLocal(true);
     appendLog(`Ich moderiere jetzt die Aufgabe${task ? ` "${task}"` : ''}.`, moderatorName);
-    await approachNpc(npcA, `Was ist aus deiner Sicht die beste Lösung${task ? ` für "${task}"` : ''}?`);
+    await approachNpc(npcA, `Bitte erklär mir deine beste Lösung${task ? ` für "${task}"` : ''} und welches Ergebnis du erwartest.`);
     checkForAbort();
     conversationState.solutions[npcA] = createProposal(npcA, task);
     appendLog(conversationState.solutions[npcA], npcAName);
     await wait(900);
     checkForAbort();
 
-    await approachNpc(npcB, `Und was ist deine beste Lösung${task ? ` für "${task}"` : ''}?`);
+    await approachNpc(npcB, `Mit Blick auf dein Ergebnis: Wie würdest du die Aufgabe${task ? ` "${task}"` : ''} lösen?`);
     checkForAbort();
     conversationState.solutions[npcB] = createProposal(npcB, task);
     appendLog(conversationState.solutions[npcB], npcBName);
     await wait(900);
     checkForAbort();
 
-    await approachNpc(npcA, `Hier ist der Vorschlag von ${npcBName}. Was hältst du davon?`);
+    await animateMoveNpc('npc1', computeCelebrationPoint(), 1600);
     checkForAbort();
-    appendLog(createOpinion(npcA, npcBName, conversationState.solutions[npcB]), npcAName);
-    await wait(800);
-    checkForAbort();
-
-    await approachNpc(npcB, `Und ${npcAName} empfiehlt Folgendes. Wie siehst du das?`);
-    checkForAbort();
-    appendLog(createOpinion(npcB, npcAName, conversationState.solutions[npcA]), npcBName);
-    await wait(800);
-    checkForAbort();
-
-    while (!solutionsAligned(conversationState.solutions[npcA], conversationState.solutions[npcB])) {
-      conversationState.compromiseRound += 1;
-
-      await approachNpc(npcA, 'Lasst uns einen gemeinsamen Nenner finden. Hast du einen Kompromissvorschlag?');
-      checkForAbort();
-      conversationState.solutions[npcA] = createCompromise(npcA, npcBName, conversationState.solutions[npcB], task);
-      appendLog(conversationState.solutions[npcA], npcAName);
-      await wait(900);
-      checkForAbort();
-
-      if (solutionsAligned(conversationState.solutions[npcA], conversationState.solutions[npcB])) {
-        break;
-      }
-
-      await approachNpc(npcB, 'Was wäre für dich ein tragfähiger Kompromiss?');
-      checkForAbort();
-      conversationState.solutions[npcB] = createCompromise(npcB, npcAName, conversationState.solutions[npcA], task);
-      appendLog(conversationState.solutions[npcB], npcBName);
-      await wait(900);
-      checkForAbort();
-
-      if (conversationState.compromiseRound >= 3 && !solutionsAligned(conversationState.solutions[npcA], conversationState.solutions[npcB])) {
-        const shared = createSharedSolution(task);
-        conversationState.solutions[npcA] = shared;
-        conversationState.solutions[npcB] = shared;
-        appendLog(shared, npcAName);
-        appendLog(shared, npcBName);
-        break;
-      }
-    }
-
-    if (solutionsAligned(conversationState.solutions[npcA], conversationState.solutions[npcB])) {
-      const finalIdea = conversationState.solutions[npcA];
-      conversationState.finalSolution = finalIdea;
-      await animateMoveNpc('npc1', computeCelebrationPoint(), 2000);
-      appendLog('Fantastisch! Wir haben eine gemeinsame Lösung gefunden!', moderatorName);
-      appendLog(`Endergebnis: ${finalIdea}`, moderatorName);
-      updateFinalSolution(finalIdea);
-    }
+    const comparison = compareSolutions(conversationState.solutions[npcA], conversationState.solutions[npcB]);
+    const summary = `Ich habe beide Lösungen verglichen. ${comparison.summary}`;
+    appendLog(summary, moderatorName);
+    conversationState.finalSolution = summary;
+    updateFinalSolution(summary);
   } catch (err) {
     if (err instanceof ConversationAbort) {
       appendLog('Das Gespräch wurde angehalten.', moderatorName);
