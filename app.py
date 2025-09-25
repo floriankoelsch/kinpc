@@ -176,8 +176,17 @@ const SCALE = 12;
 const BOT_BASE = `http://__BOT_HOST__:__BOT_PORT__`;
 const NPC_COLORS = ['#38bdf8', '#fbbf24', '#34d399'];
 const PLAYER_COLOR = '#a78bfa';
-let npcs = [];
-let players = [];
+const DEFAULT_NPCS = [
+  { id: 'npc1', name: 'Moderator', x: 10.0, y: 10.0 },
+  { id: 'npc2', name: 'NPC 1', x: 14.0, y: 10.0 },
+  { id: 'npc3', name: 'NPC 2', x: 18.0, y: 10.0 }
+];
+const DEFAULT_PLAYERS = [
+  { id: 'p1', name: 'Spieler1', x: 18.0, y: 14.0 }
+];
+
+let npcs = DEFAULT_NPCS.map((npc) => ({ ...npc }));
+let players = DEFAULT_PLAYERS.map((player) => ({ ...player }));
 let greetRadius = 4.0;
 let dragging = null;
 let suspendRefresh = false;
@@ -326,8 +335,8 @@ async function refreshLocal(force=false) {
   try {
     const r = await fetch('/state_mini');
     const s = await r.json();
-    npcs = s.npcs || [];
-    players = s.players || [];
+    npcs = (s.npcs && s.npcs.length ? s.npcs : DEFAULT_NPCS).map((npc) => ({ ...npc }));
+    players = (s.players && s.players.length ? s.players : DEFAULT_PLAYERS).map((player) => ({ ...player }));
     document.getElementById('last').textContent = s.last_push_ok ? (`OK: ${s.last_push_msg}`) : (`Fehler: ${s.last_push_msg}`);
     document.getElementById('active').textContent = s.push_enabled ? 'AN' : 'AUS';
     updateDistances();
@@ -335,6 +344,14 @@ async function refreshLocal(force=false) {
     return s;
   } catch (err) {
     console.error('state_mini fehlgeschlagen', err);
+    if (!npcs.length) {
+      npcs = DEFAULT_NPCS.map((npc) => ({ ...npc }));
+    }
+    if (!players.length) {
+      players = DEFAULT_PLAYERS.map((player) => ({ ...player }));
+    }
+    updateDistances();
+    draw();
     return null;
   }
 }
@@ -596,6 +613,11 @@ function setControlsRunning(running) {
 
 async function runConversation() {
   if (conversationState.running) return;
+  if (!getNpcById('npc1') || !getNpcById('npc2') || !getNpcById('npc3')) {
+    npcs = DEFAULT_NPCS.map((npc) => ({ ...npc }));
+    players = DEFAULT_PLAYERS.map((player) => ({ ...player }));
+    draw();
+  }
   conversationState.running = true;
   conversationState.stopRequested = false;
   conversationState.clearOnStop = false;
