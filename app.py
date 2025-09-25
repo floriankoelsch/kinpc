@@ -457,7 +457,7 @@ function getNpcName(id) {
 
 function describePrompt(prompt) {
   if (!prompt) return 'einen neutralen Ansatz verfolgt';
-  const sentences = prompt.split(/\r?\n|[.!?]/).map((s) => s.trim()).filter(Boolean);
+  const sentences = prompt.split(/\\r?\\n|[.!?]/).map((s) => s.trim()).filter(Boolean);
   const first = sentences.length ? sentences[0] : prompt.trim();
   return first.length > 140 ? `${first.slice(0, 137)}...` : first;
 }
@@ -608,8 +608,8 @@ function tokenizeSolution(text) {
   if (!text) return [];
   return text
     .toLowerCase()
-    .replace(/[^a-zäöüß0-9 \t\n\r]/gi, ' ')
-    .split(/[ \t\n\r]+/)
+    .replace(/[^a-zäöüß0-9 \\t\\n\\r]/gi, ' ')
+    .split(/[ \\t\\n\\r]+/)
     .filter((word) => word.length > 1);
 }
 
