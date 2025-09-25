@@ -61,16 +61,21 @@ echo Verwende: %PYTHON_EXE%  (%PYVER%)
 call :log "Python: %PYTHON_EXE%  (%PYVER%)"
 
 REM --- Virtuelle Umgebung sicherstellen ---
-if not exist "venv\Scripts\python.exe" (
-  call :log "Erstelle venv..."
-  "%PYTHON_EXE%" -m venv venv >> "%LOG_FILE%" 2>&1
+set "VENV_DIR=.venv"
+if exist "venv\Scripts\python.exe" set "VENV_DIR=venv"
+if not exist "%VENV_DIR%\Scripts\python.exe" (
+  set "VENV_DIR=.venv"
+)
+if not exist "%VENV_DIR%\Scripts\python.exe" (
+  call :log "Erstelle venv in %VENV_DIR%..."
+  "%PYTHON_EXE%" -m venv "%VENV_DIR%" >> "%LOG_FILE%" 2>&1
   if errorlevel 1 (
     call :err "[FEHLER] venv konnte nicht erstellt werden (Details siehe %LOG_FILE%)."
     goto :end_fail
   )
 )
-set "VENV_PY=venv\Scripts\python.exe"
-set "VENV_PIP=venv\Scripts\pip.exe"
+set "VENV_PY=%VENV_DIR%\Scripts\python.exe"
+set "VENV_PIP=%VENV_DIR%\Scripts\pip.exe"
 
 REM --- Abhängigkeiten ---
 if exist "requirements.txt" (
@@ -99,7 +104,7 @@ if /I "%USE_RELOAD%"=="true" set "RELOAD_FLAG=--reload"
 
 call :log "Starte Uvicorn: %APP_MODULE% auf %APP_HOST%:%APP_PORT% ..."
 echo Starte Mini-Map (FastAPI) auf %APP_HOST%:%APP_PORT% ...
-start "KI-NPC App %APP_PORT%" cmd /k "venv\Scripts\python.exe -m uvicorn %APP_MODULE% --host %APP_HOST% --port %APP_PORT% %RELOAD_FLAG%"
+start "KI-NPC App %APP_PORT%" cmd /k "%VENV_PY%" -m uvicorn %APP_MODULE% --host %APP_HOST% --port %APP_PORT% %RELOAD_FLAG%
 
 REM kurze Wartezeit
 timeout /t 2 /nobreak >nul
@@ -109,11 +114,11 @@ REM == Start: Bot ===========
 REM =========================
 if exist "%BOT_FILE%" (
   call :log "Starte Bot: %BOT_FILE%"
-  start "KI-NPC Bot" cmd /k "venv\Scripts\python.exe %BOT_FILE%"
+  start "KI-NPC Bot" cmd /k "%VENV_PY%" %BOT_FILE%
 ) else (
   if exist "%ALT_BOT_FILE%" (
     call :warn "[HINWEIS] %BOT_FILE% fehlt – starte %ALT_BOT_FILE%."
-    start "KI-NPC Bot (alt)" cmd /k "venv\Scripts\python.exe %ALT_BOT_FILE%"
+    start "KI-NPC Bot (alt)" cmd /k "%VENV_PY%" %ALT_BOT_FILE%
   ) else (
     call :warn "[HINWEIS] Kein Bot-Skript gefunden (%BOT_FILE% / %ALT_BOT_FILE%)."
   )
