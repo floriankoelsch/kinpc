@@ -383,10 +383,10 @@ def npc_pair_start(pair_key: str):
     npc_pair_say(pair_key, NPC_IDS[0], focus=f"Beginne das Gespräch mit {NPC_CONFIG[NPC_IDS[1]]['name']}.")
     npc_pair_say(pair_key, NPC_IDS[1], focus=f"Reagiere direkt auf {NPC_CONFIG[NPC_IDS[0]]['name']} und halte das Gespräch in Gang.")
 
-def npc_pair_pause(pair_key: str):
+def npc_pair_pause(pair_key: str, reason: str = "zu weit entfernt"):
     st = ensure_pair_state(pair_key)
     if st.get("mode") != "idle":
-        log("[NPC-PAIR] Gespräch pausiert (zu weit entfernt)")
+        log(f"[NPC-PAIR] Gespräch pausiert ({reason})")
     st["mode"] = "idle"
     npc_pair_state[pair_key] = st
 
@@ -542,9 +542,25 @@ def proximity_loop():
                 ps = list(players)
             npc1 = npc_copy.get("npc1", (0.0, 0.0))
             npc2 = npc_copy.get("npc2", (0.0, 0.0))
+
+            player_entries = []
+            any_player_within_radius = False
+            for p in ps:
+                name = p.get("name", "Spieler")
+                pid = p.get("id", name)
+                st = pstate.get(pid)
+                if st is None:
+                    st = {"mode": "idle", "last_seen": 0.0, "last_listen": 0.0, "last_interaction": 0.0}
+                    pstate[pid] = st
+                player_pos = (p.get("x", 0.0), p.get("y", 0.0))
+                min_dist = min(dist2(npc1, player_pos), dist2(npc2, player_pos))
+                if min_dist <= GREET_RADIUS:
+                    any_player_within_radius = True
+                player_entries.append((pid, name, st, min_dist))
+
             pair_state = ensure_pair_state(NPC_PAIR_KEY)
             dist_pair = dist2(npc1, npc2)
-            if dist_pair <= GREET_RADIUS:
+            if dist_pair <= GREET_RADIUS and any_player_within_radius:
                 if pair_state.get("mode") != "chatting":
                     npc_pair_start(NPC_PAIR_KEY)
                     pair_state = ensure_pair_state(NPC_PAIR_KEY)
@@ -553,16 +569,12 @@ def proximity_loop():
                     npc_pair_say(NPC_PAIR_KEY, next_speaker)
                     pair_state = ensure_pair_state(NPC_PAIR_KEY)
             else:
-                npc_pair_pause(NPC_PAIR_KEY)
+                reason = "zu weit entfernt" if dist_pair > GREET_RADIUS else "keine Spieler in Reichweite"
+                npc_pair_pause(NPC_PAIR_KEY, reason=reason)
                 pair_state = ensure_pair_state(NPC_PAIR_KEY)
 
-            for p in ps:
-                name = p.get("name", "Spieler")
-                pid = p.get("id", name)
-                st = pstate.get(pid, {"mode": "idle", "last_seen": 0, "last_listen": 0, "last_interaction": 0})
-                player_pos = (p.get("x", 0.0), p.get("y", 0.0))
-                min_dist = min(dist2(npc1, player_pos), dist2(npc2, player_pos))
-                pair_active = ensure_pair_state(NPC_PAIR_KEY).get("mode") == "chatting"
+            pair_active = pair_state.get("mode") == "chatting"
+            for pid, name, st, min_dist in player_entries:
                 if min_dist <= GREET_RADIUS and pair_active:
                     st["last_seen"] = now
                     if st["mode"] == "idle":
