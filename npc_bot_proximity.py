@@ -3,6 +3,7 @@ import os, time, threading, io, sqlite3
 from typing import Dict, List, Any, Optional, Tuple
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from fastapi.encoders import jsonable_encoder
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -111,6 +112,21 @@ npc_pair_state: Dict[str, Dict[str, Any]] = {
 log_lines: List[str] = []
 _resolved_out: Optional[int] = None
 _resolved_in: Optional[int] = None
+
+
+def _jsonable(obj: Any) -> Any:
+    """Convert sounddevice structures to JSON-friendly values."""
+    if isinstance(obj, dict):
+        return {k: _jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_jsonable(v) for v in obj]
+    # numpy scalars provide ``item`` to retrieve Python primitives
+    if hasattr(obj, "item"):
+        try:
+            return obj.item()
+        except Exception:
+            pass
+    return obj
 
 # ----------------- Mini-Logger ------------------
 def log(msg: str):
@@ -429,12 +445,16 @@ def get_log(): return {"lines": log_lines[-160:]}
 
 @app.get("/devices")
 def devices():
-    if sd is None: return {"error":"sounddevice nicht installiert"}
+    if sd is None:
+        return {"error": "sounddevice nicht installiert"}
     try:
         devs = sd.query_devices()
-        return {"devices": devs, 
-                "default_output": sd.query_devices(None,"output"),
-                "default_input": sd.query_devices(None,"input")}
+        payload = {
+            "devices": [_jsonable(dict(d)) for d in devs],
+            "default_output": _jsonable(dict(sd.query_devices(None, "output"))),
+            "default_input": _jsonable(dict(sd.query_devices(None, "input"))),
+        }
+        return JSONResponse(content=jsonable_encoder(payload))
     except Exception as e:
         return {"error": str(e)}
 
@@ -454,24 +474,26 @@ def reset(player_id: str):
 @app.post("/set_out/{idx}")
 def set_out(idx: int):
     global _resolved_out
-    if sd is None: return {"error":"sounddevice nicht installiert"}
+    if sd is None:
+        return {"error": "sounddevice nicht installiert"}
     try:
-        dev = sd.query_devices()[idx]
+        dev = dict(sd.query_devices()[idx])
         _resolved_out = idx
         log(f"Audio OUT: manuell -> {idx} ({dev['name']})")
-        return {"ok": True, "device": dev}
+        return JSONResponse(content=jsonable_encoder({"ok": True, "device": _jsonable(dev)}))
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=400)
 
 @app.post("/set_in/{idx}")
 def set_in(idx: int):
     global _resolved_in
-    if sd is None: return {"error":"sounddevice nicht installiert"}
+    if sd is None:
+        return {"error": "sounddevice nicht installiert"}
     try:
-        dev = sd.query_devices()[idx]
+        dev = dict(sd.query_devices()[idx])
         _resolved_in = idx
         log(f"Audio IN: manuell -> {idx} ({dev['name']})")
-        return {"ok": True, "device": dev}
+        return JSONResponse(content=jsonable_encoder({"ok": True, "device": _jsonable(dev)}))
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=400)
 
