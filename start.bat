@@ -75,17 +75,43 @@ if not exist "%VENV_DIR%\Scripts\python.exe" (
   )
 )
 set "VENV_PY=%VENV_DIR%\Scripts\python.exe"
-set "VENV_PIP=%VENV_DIR%\Scripts\pip.exe"
+
+REM Sicherheitscheck: pip-Modul in der venv vorhanden?
+"%VENV_PY%" -m ensurepip --upgrade >> "%LOG_FILE%" 2>&1
+if errorlevel 1 (
+  call :err "[FEHLER] ensurepip konnte nicht ausgefuehrt werden. Bitte pruefe die Python-Installation."
+  goto :end_fail
+)
 
 REM --- Abhängigkeiten ---
+call :log "Aktualisiere pip in der virtuellen Umgebung…"
+"%VENV_PY%" -m pip install --upgrade pip >> "%LOG_FILE%" 2>&1
+if errorlevel 1 (
+  call :err "[FEHLER] pip konnte nicht aktualisiert werden. Details siehe %LOG_FILE%."
+  goto :end_fail
+)
+
 if exist "requirements.txt" (
   call :log "Installiere requirements.txt…"
-  "%VENV_PIP%" install --upgrade pip >> "%LOG_FILE%" 2>&1
-  "%VENV_PIP%" install -r requirements.txt >> "%LOG_FILE%" 2>&1
+  "%VENV_PY%" -m pip install -r requirements.txt >> "%LOG_FILE%" 2>&1
+  if errorlevel 1 (
+    call :err "[FEHLER] Installation aus requirements.txt fehlgeschlagen. Details siehe %LOG_FILE%."
+    goto :end_fail
+  )
 ) else (
   call :log "Keine requirements.txt – installiere Mindestpakete…"
-  "%VENV_PIP%" install --upgrade pip >> "%LOG_FILE%" 2>&1
-  "%VENV_PIP%" install fastapi uvicorn >> "%LOG_FILE%" 2>&1
+  "%VENV_PY%" -m pip install fastapi uvicorn >> "%LOG_FILE%" 2>&1
+  if errorlevel 1 (
+    call :err "[FEHLER] Mindestpakete konnten nicht installiert werden. Details siehe %LOG_FILE%."
+    goto :end_fail
+  )
+)
+
+REM Pruefen, ob kritische Pakete vorhanden sind
+"%VENV_PY%" -c "import fastapi, uvicorn" >> "%LOG_FILE%" 2>&1
+if errorlevel 1 (
+  call :err "[FEHLER] FastAPI oder Uvicorn fehlen weiterhin. Bitte pruefe die Internetverbindung und siehe %LOG_FILE%."
+  goto :end_fail
 )
 
 REM --- .env prüfen (nur Hinweis, nicht abbrechen) ---
