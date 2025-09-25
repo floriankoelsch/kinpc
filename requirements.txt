@@ -9,12 +9,3 @@ soundfile
 scipy
 openai
 elevenlabs
-# Audio vorzugsweise schon korrekt gesetzt, sonst auto:
-OUT_DEVICE_ID=23           # CABLE Input → Playback in TS
-IN_DEVICE_ID=41          # optional: CABLE Output → wenn du fix setzen willst
-TARGET_SR=48000
-GREET_RADIUS=4.0
-LISTEN_DURATION_SEC=6.0
-
-
-
