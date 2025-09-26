@@ -71,6 +71,15 @@ NPC_IDS = list(NPC_CONFIG.keys())
 NPC_PAIR_KEY = "npcpair:" + ":".join(NPC_IDS)
 PAIR_DB_ID = NPC_PAIR_KEY
 
+environment_profile: Dict[str, Any] = {
+    "id": None,
+    "name": "",
+    "radius": GREET_RADIUS,
+    "weights": {},
+    "task": "",
+    "agents": [],
+}
+
 # ----------------- libs (robust) ----------------
 _errs: List[str] = []
 try:
@@ -180,6 +189,47 @@ def db_reset(player_id: str):
         conn.commit(); conn.close()
 
 db_init()
+
+# ----------------- Environment Sync -----------
+def apply_environment_metadata(env_data: Optional[Dict[str, Any]]) -> None:
+    global GREET_RADIUS
+    if not isinstance(env_data, dict):
+        return
+    env_id = env_data.get("id")
+    environment_profile["id"] = env_id
+    environment_profile["name"] = env_data.get("name", environment_profile.get("name", ""))
+    environment_profile["weights"] = env_data.get("weights", environment_profile.get("weights", {}))
+    environment_profile["task"] = env_data.get("task", environment_profile.get("task", ""))
+    environment_profile["agents"] = env_data.get("agents", environment_profile.get("agents", []))
+    radius = env_data.get("radius_m")
+    if radius is not None:
+        try:
+            new_radius = min(4.0, float(radius))
+            environment_profile["radius"] = new_radius
+            GREET_RADIUS = new_radius
+        except (TypeError, ValueError):
+            pass
+    agents = env_data.get("agents", [])
+    for agent in agents:
+        if not isinstance(agent, dict):
+            continue
+        aid = agent.get("id")
+        if not aid:
+            continue
+        cfg = NPC_CONFIG.setdefault(
+            aid,
+            {
+                "name": aid,
+                "persona": _persona_default(aid, "NPC"),
+                "voice_id": ELEVENLABS_VOICE_ID,
+            },
+        )
+        if agent.get("name"):
+            cfg["name"] = agent["name"]
+        if agent.get("prompt"):
+            cfg["persona"] = agent["prompt"]
+        if agent.get("voice_id"):
+            cfg["voice_id"] = agent["voice_id"]
 
 # ----------------- OpenAI/ElevenLabs -----------
 def openai_chat(messages: List[Dict[str, str]], max_tokens=128, temp=0.7) -> str:
@@ -438,6 +488,7 @@ def state():
         "listen_sec": LISTEN_DURATION_SEC,
         "sessions": pstate,
         "pair_state": pair_info,
+        "environment": environment_profile,
     }
 
 @app.get("/log")
@@ -508,6 +559,7 @@ async def update(req: Request):
     data = await req.json()
     ps = data.get("players", [])
     npcs_in = data.get("npcs", [])
+    apply_environment_metadata(data.get("environment"))
     if not isinstance(ps, list):
         return JSONResponse({"error":"Invalid payload"}, status_code=400)
     with positions_lock:
@@ -515,9 +567,13 @@ async def update(req: Request):
             for n in npcs_in:
                 try:
                     nid = str(n.get("id", ""))
+                    x_val = float(n.get("x", 0.0))
+                    y_val = float(n.get("y", 0.0))
                     if nid in npc_positions:
-                        npc_positions[nid][0] = float(n.get("x", npc_positions[nid][0]))
-                        npc_positions[nid][1] = float(n.get("y", npc_positions[nid][1]))
+                        npc_positions[nid][0] = x_val
+                        npc_positions[nid][1] = y_val
+                    else:
+                        npc_positions[nid] = [x_val, y_val]
                 except Exception:
                     pass
         norm = []
