@@ -67,9 +67,19 @@ NPC_CONFIG: Dict[str, Dict[str, str]] = {
     },
 }
 
-NPC_IDS = list(NPC_CONFIG.keys())
-NPC_PAIR_KEY = "npcpair:" + ":".join(NPC_IDS)
-PAIR_DB_ID = NPC_PAIR_KEY
+MODERATOR_ID: Optional[str] = "npc1"
+NPC_ROSTER: List[str] = [nid for nid in NPC_CONFIG.keys() if nid != MODERATOR_ID]
+CONVO_KEY = "npc_convo"
+PAIR_DB_ID = "npcpair:log"
+
+environment_profile: Dict[str, Any] = {
+    "id": None,
+    "name": "",
+    "radius": GREET_RADIUS,
+    "weights": {},
+    "task": "",
+    "agents": [],
+}
 
 # ----------------- libs (robust) ----------------
 _errs: List[str] = []
@@ -100,14 +110,7 @@ players: List[Dict[str, Any]] = []
 # per-player Zustand
 # { player_id: { "mode": "idle"|"chatting", "last_seen": ts, "last_listen": ts, "last_interaction": ts } }
 pstate: Dict[str, Dict[str, float]] = {}
-npc_pair_state: Dict[str, Dict[str, Any]] = {
-    NPC_PAIR_KEY: {
-        "mode": "idle",
-        "last_exchange": 0.0,
-        "next_speaker": "npc1",
-        "player_last_greet": {},
-    }
-}
+npc_pair_state: Dict[str, Dict[str, Any]] = {}
 
 log_lines: List[str] = []
 _resolved_out: Optional[int] = None
@@ -180,6 +183,74 @@ def db_reset(player_id: str):
         conn.commit(); conn.close()
 
 db_init()
+
+# ----------------- Environment Sync -----------
+def apply_environment_metadata(env_data: Optional[Dict[str, Any]]) -> None:
+    global GREET_RADIUS, MODERATOR_ID, NPC_ROSTER
+    if not isinstance(env_data, dict):
+        return
+    env_id = env_data.get("id")
+    environment_profile["id"] = env_id
+    environment_profile["name"] = env_data.get("name", environment_profile.get("name", ""))
+    environment_profile["weights"] = env_data.get("weights", environment_profile.get("weights", {}))
+    environment_profile["task"] = env_data.get("task", environment_profile.get("task", ""))
+    environment_profile["agents"] = env_data.get("agents", environment_profile.get("agents", []))
+    radius = env_data.get("radius_m")
+    if radius is not None:
+        try:
+            new_radius = min(4.0, float(radius))
+            environment_profile["radius"] = new_radius
+            GREET_RADIUS = new_radius
+        except (TypeError, ValueError):
+            pass
+    agents = env_data.get("agents", [])
+    seen_ids: List[str] = []
+    roster: List[str] = []
+    moderator_id: Optional[str] = None
+    for agent in agents:
+        if not isinstance(agent, dict):
+            continue
+        aid = agent.get("id")
+        if not aid:
+            continue
+        seen_ids.append(aid)
+        cfg = NPC_CONFIG.setdefault(
+            aid,
+            {
+                "name": aid,
+                "persona": _persona_default(aid, "NPC"),
+                "voice_id": ELEVENLABS_VOICE_ID,
+            },
+        )
+        if agent.get("name"):
+            cfg["name"] = agent["name"]
+        if agent.get("prompt"):
+            cfg["persona"] = agent["prompt"]
+        if agent.get("voice_id"):
+            cfg["voice_id"] = agent["voice_id"]
+        role = agent.get("role", "npc")
+        if role == "moderator" and not moderator_id:
+            moderator_id = aid
+        elif role != "moderator":
+            roster.append(aid)
+        try:
+            x_val = float(agent.get("x", 0.0))
+            y_val = float(agent.get("y", 0.0))
+            with positions_lock:
+                npc_positions.setdefault(aid, [x_val, y_val])
+        except Exception:
+            pass
+    for existing in list(NPC_CONFIG.keys()):
+        if existing not in seen_ids:
+            NPC_CONFIG.pop(existing, None)
+            with positions_lock:
+                npc_positions.pop(existing, None)
+    MODERATOR_ID = moderator_id
+    NPC_ROSTER = roster or [nid for nid in NPC_CONFIG.keys() if nid != MODERATOR_ID]
+    st = ensure_pair_state(CONVO_KEY)
+    if NPC_ROSTER:
+        st["next_speaker"] = NPC_ROSTER[0]
+    npc_pair_state[CONVO_KEY] = st
 
 # ----------------- OpenAI/ElevenLabs -----------
 def openai_chat(messages: List[Dict[str, str]], max_tokens=128, temp=0.7) -> str:
@@ -312,33 +383,36 @@ def transcribe_wav(wav_bytes: bytes) -> str:
         log(f"STT-Fehler: {e}"); return ""
 
 # ----------------- Dialog-Engine ----------------
+def conversation_roster() -> List[str]:
+    roster = [nid for nid in NPC_ROSTER if nid in NPC_CONFIG]
+    if roster:
+        return roster
+    fallback = [nid for nid in NPC_CONFIG.keys() if nid != MODERATOR_ID]
+    return fallback or list(NPC_CONFIG.keys())
+
+
 def ensure_pair_state(pair_key: str) -> Dict[str, Any]:
+    roster = conversation_roster()
+    default_next = roster[0] if roster else None
     st = npc_pair_state.setdefault(
         pair_key,
-        {"mode": "idle", "last_exchange": 0.0, "next_speaker": NPC_IDS[0], "player_last_greet": {}},
+        {"mode": "idle", "last_exchange": 0.0, "next_speaker": default_next, "player_last_greet": {}},
     )
     st.setdefault("player_last_greet", {})
-    if st.get("next_speaker") not in NPC_IDS:
-        st["next_speaker"] = NPC_IDS[0]
+    if roster and st.get("next_speaker") not in roster:
+        st["next_speaker"] = default_next
     return st
 
-def other_npc(current: str) -> str:
-    for nid in NPC_IDS:
-        if nid != current:
-            return nid
-    return current
 
-def transcript_from_memory(limit: int = 40) -> str:
-    rows = db_get_last(PAIR_DB_ID, limit=limit)
-    lines: List[str] = []
-    for role, content in rows:
-        if role.startswith("player:"):
-            name = role.split(":", 1)[1] or "Spieler"
-            lines.append(f"Spieler {name}: {content}")
-        else:
-            cfg = NPC_CONFIG.get(role, {"name": role})
-            lines.append(f"{cfg.get('name', role)}: {content}")
-    return "\n".join(lines)
+def other_npc(current: str) -> str:
+    roster = conversation_roster()
+    if not roster:
+        return current
+    if current not in roster:
+        return roster[0]
+    idx = roster.index(current)
+    return roster[(idx + 1) % len(roster)]
+
 
 def npc_pair_say(pair_key: str, speaker: str, focus: Optional[str] = None) -> Optional[str]:
     cfg = NPC_CONFIG.get(speaker)
@@ -376,12 +450,23 @@ def npc_pair_start(pair_key: str):
     st = ensure_pair_state(pair_key)
     if st.get("mode") == "chatting":
         return
+    roster = conversation_roster()
+    if len(roster) < 2:
+        log("[NPC-PAIR] Zu wenige NPCs für ein Gespräch.")
+        return
     log("[NPC-PAIR] Gespräch startet")
     st["mode"] = "chatting"
-    st["next_speaker"] = NPC_IDS[0]
+    st["next_speaker"] = roster[0]
     npc_pair_state[pair_key] = st
-    npc_pair_say(pair_key, NPC_IDS[0], focus=f"Beginne das Gespräch mit {NPC_CONFIG[NPC_IDS[1]]['name']}.")
-    npc_pair_say(pair_key, NPC_IDS[1], focus=f"Reagiere direkt auf {NPC_CONFIG[NPC_IDS[0]]['name']} und halte das Gespräch in Gang.")
+    others = ", ".join(NPC_CONFIG.get(r, {}).get("name", r) for r in roster[1:])
+    focus_intro = f"Beginne das Gespräch mit {others}." if others else "Starte das Gespräch."
+    npc_pair_say(pair_key, roster[0], focus=focus_intro)
+    if len(roster) >= 2:
+        second_focus = "Reagiere direkt auf " + NPC_CONFIG.get(roster[0], {}).get("name", roster[0])
+        if len(roster) > 2:
+            additional = ", ".join(NPC_CONFIG.get(r, {}).get("name", r) for r in roster[2:])
+            second_focus += f" und binde {additional} ein."
+        npc_pair_say(pair_key, roster[1], focus=second_focus)
 
 def npc_pair_pause(pair_key: str, reason: str = "zu weit entfernt"):
     st = ensure_pair_state(pair_key)
@@ -392,7 +477,10 @@ def npc_pair_pause(pair_key: str, reason: str = "zu weit entfernt"):
 
 def npc_pair_greet_player(pair_key: str, player_id: str, player_name: str):
     st = ensure_pair_state(pair_key)
-    speaker = st.get("next_speaker") or NPC_IDS[0]
+    roster = conversation_roster()
+    speaker = st.get("next_speaker") or (roster[0] if roster else None)
+    if not speaker:
+        return
     npc_pair_say(pair_key, speaker, focus=f"Begrüße freundlich den Spieler namens {player_name}, der gerade dazu stößt.")
     st = ensure_pair_state(pair_key)
     st.setdefault("player_last_greet", {})[player_id] = time.time()
@@ -407,7 +495,10 @@ def handle_player_speech(pair_key: str, player_id: str, player_name: str) -> boo
         return False
     db_add(PAIR_DB_ID, f"player:{player_id}", user_text)
     st = ensure_pair_state(pair_key)
-    speaker = st.get("next_speaker") or NPC_IDS[0]
+    roster = conversation_roster()
+    speaker = st.get("next_speaker") or (roster[0] if roster else None)
+    if not speaker:
+        return False
     focus = f"Der Spieler {player_name} sagt: '{user_text}'. Antworte direkt darauf."
     npc_pair_say(pair_key, speaker, focus=focus)
     return True
@@ -424,7 +515,7 @@ def state():
             for nid, pos in npc_positions.items()
         ]
         pl = list(players)
-    pair_info = ensure_pair_state(NPC_PAIR_KEY)
+    pair_info = ensure_pair_state(CONVO_KEY)
     return {
         "npcs": npc_list,
         "players": pl,
@@ -438,6 +529,7 @@ def state():
         "listen_sec": LISTEN_DURATION_SEC,
         "sessions": pstate,
         "pair_state": pair_info,
+        "environment": environment_profile,
     }
 
 @app.get("/log")
@@ -466,9 +558,9 @@ def memory(player_id: str):
 def reset(player_id: str):
     db_reset(player_id)
     pstate.pop(player_id, None)
-    st = ensure_pair_state(NPC_PAIR_KEY)
+    st = ensure_pair_state(CONVO_KEY)
     st.get("player_last_greet", {}).pop(player_id, None)
-    npc_pair_state[NPC_PAIR_KEY] = st
+    npc_pair_state[CONVO_KEY] = st
     return {"ok": True}
 
 @app.post("/set_out/{idx}")
@@ -508,6 +600,7 @@ async def update(req: Request):
     data = await req.json()
     ps = data.get("players", [])
     npcs_in = data.get("npcs", [])
+    apply_environment_metadata(data.get("environment"))
     if not isinstance(ps, list):
         return JSONResponse({"error":"Invalid payload"}, status_code=400)
     with positions_lock:
@@ -515,9 +608,13 @@ async def update(req: Request):
             for n in npcs_in:
                 try:
                     nid = str(n.get("id", ""))
+                    x_val = float(n.get("x", 0.0))
+                    y_val = float(n.get("y", 0.0))
                     if nid in npc_positions:
-                        npc_positions[nid][0] = float(n.get("x", npc_positions[nid][0]))
-                        npc_positions[nid][1] = float(n.get("y", npc_positions[nid][1]))
+                        npc_positions[nid][0] = x_val
+                        npc_positions[nid][1] = y_val
+                    else:
+                        npc_positions[nid] = [x_val, y_val]
                 except Exception:
                     pass
         norm = []
@@ -540,71 +637,90 @@ def proximity_loop():
             with positions_lock:
                 npc_copy = {nid: tuple(pos) for nid, pos in npc_positions.items()}
                 ps = list(players)
-            npc1 = npc_copy.get("npc1", (0.0, 0.0))
-            npc2 = npc_copy.get("npc2", (0.0, 0.0))
-
+            roster = conversation_roster()
+            active_ids = [nid for nid in roster if nid in npc_copy]
+            cluster_ready = False
+            if len(active_ids) >= 2:
+                cluster_ready = True
+                for i in range(len(active_ids)):
+                    for j in range(i + 1, len(active_ids)):
+                        if dist2(npc_copy[active_ids[i]], npc_copy[active_ids[j]]) > GREET_RADIUS:
+                            cluster_ready = False
+                            break
+                    if not cluster_ready:
+                        break
             player_entries = []
             any_player_within_radius = False
             for p in ps:
-                name = p.get("name", "Spieler")
-                pid = p.get("id", name)
+                name = p.get('name', 'Spieler')
+                pid = p.get('id', name)
                 st = pstate.get(pid)
                 if st is None:
-                    st = {"mode": "idle", "last_seen": 0.0, "last_listen": 0.0, "last_interaction": 0.0}
+                    st = {'mode': 'idle', 'last_seen': 0.0, 'last_listen': 0.0, 'last_interaction': 0.0}
                     pstate[pid] = st
-                player_pos = (p.get("x", 0.0), p.get("y", 0.0))
-                min_dist = min(dist2(npc1, player_pos), dist2(npc2, player_pos))
+                player_pos = (p.get('x', 0.0), p.get('y', 0.0))
+                distances = [dist2(npc_copy[nid], player_pos) for nid in active_ids]
+                min_dist = min(distances) if distances else float('inf')
                 if min_dist <= GREET_RADIUS:
                     any_player_within_radius = True
                 player_entries.append((pid, name, st, min_dist))
 
-            pair_state = ensure_pair_state(NPC_PAIR_KEY)
-            dist_pair = dist2(npc1, npc2)
-            if dist_pair <= GREET_RADIUS and any_player_within_radius:
-                if pair_state.get("mode") != "chatting":
-                    npc_pair_start(NPC_PAIR_KEY)
-                    pair_state = ensure_pair_state(NPC_PAIR_KEY)
-                elif (now - pair_state.get("last_exchange", 0)) >= NPC_CHAT_GAP_SEC:
-                    next_speaker = pair_state.get("next_speaker") or NPC_IDS[0]
-                    npc_pair_say(NPC_PAIR_KEY, next_speaker)
-                    pair_state = ensure_pair_state(NPC_PAIR_KEY)
+            pair_state = ensure_pair_state(CONVO_KEY)
+            if cluster_ready:
+                if pair_state.get('mode') != 'chatting':
+                    npc_pair_start(CONVO_KEY)
+                    pair_state = ensure_pair_state(CONVO_KEY)
+                elif (now - pair_state.get('last_exchange', 0)) >= NPC_CHAT_GAP_SEC:
+                    next_speaker = pair_state.get('next_speaker') or (active_ids[0] if active_ids else None)
+                    if next_speaker:
+                        npc_pair_say(CONVO_KEY, next_speaker)
+                        pair_state = ensure_pair_state(CONVO_KEY)
             else:
-                reason = "zu weit entfernt" if dist_pair > GREET_RADIUS else "keine Spieler in Reichweite"
-                npc_pair_pause(NPC_PAIR_KEY, reason=reason)
-                pair_state = ensure_pair_state(NPC_PAIR_KEY)
+                if not active_ids:
+                    reason = 'keine NPCs'
+                elif len(active_ids) < 2:
+                    reason = 'zu wenige NPCs'
+                else:
+                    reason = 'zu weit entfernt'
+                npc_pair_pause(CONVO_KEY, reason=reason)
+                pair_state = ensure_pair_state(CONVO_KEY)
 
-            pair_active = pair_state.get("mode") == "chatting"
+            pair_active = pair_state.get('mode') == 'chatting'
+            last_greets = pair_state.get('player_last_greet', {})
             for pid, name, st, min_dist in player_entries:
                 if min_dist <= GREET_RADIUS and pair_active:
-                    st["last_seen"] = now
-                    if st["mode"] == "idle":
-                        last_greet = ensure_pair_state(NPC_PAIR_KEY)["player_last_greet"].get(pid, 0)
+                    st['last_seen'] = now
+                    if st['mode'] == 'idle':
+                        last_greet = last_greets.get(pid, 0)
                         if (now - last_greet) >= 5.0:
                             log(f"[PLAYER] join -> {pid} dist={min_dist:.2f}")
-                            npc_pair_greet_player(NPC_PAIR_KEY, pid, name)
-                        st["mode"] = "chatting"
-                        st["last_interaction"] = now
+                            npc_pair_greet_player(CONVO_KEY, pid, name)
+                            last_greets[pid] = time.time()
+                        st['mode'] = 'chatting'
+                        st['last_interaction'] = now
                         pstate[pid] = st
                         continue
 
-                    if st["mode"] == "chatting" and (now - st.get("last_listen", 0)) >= INTER_LISTEN_GAP:
-                        st["last_listen"] = now
+                    if st['mode'] == 'chatting' and (now - st.get('last_listen', 0)) >= INTER_LISTEN_GAP:
+                        st['last_listen'] = now
                         pstate[pid] = st
-                        said = handle_player_speech(NPC_PAIR_KEY, pid, name)
+                        said = handle_player_speech(CONVO_KEY, pid, name)
                         if said:
-                            st["last_interaction"] = time.time()
+                            st['last_interaction'] = time.time()
                             pstate[pid] = st
                 else:
-                    if st["mode"] != "idle":
-                        idle_for = now - max(st.get("last_seen", 0), st.get("last_interaction", 0))
+                    if st['mode'] != 'idle':
+                        idle_for = now - max(st.get('last_seen', 0), st.get('last_interaction', 0))
                         if idle_for >= CONVO_INACTIVITY_TIMEOUT:
                             log(f"[PLAYER] end -> {pid} idle {idle_for:.1f}s")
-                            st["mode"] = "idle"
+                            st['mode'] = 'idle'
                             pstate[pid] = st
+            pair_state['player_last_greet'] = last_greets
 
         except Exception as e:
             log(f"Loop-Fehler: {e}")
         time.sleep(0.2)
+
 
 def main():
     t = threading.Thread(target=proximity_loop, daemon=True); t.start()
